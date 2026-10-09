@@ -1,0 +1,965 @@
+---
+title: "Voorspelling huizen prijzen in Nederland."
+author: "Robert de Ridder"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    number_sections: yes
+    toc: true
+    toc_depth: 4
+    fig_caption: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE,
+  fig.width = 8,
+  fig.height = 6,
+  out.width = "70%",
+  fig.align = "center"
+  )
+```
+
+```{r library, include=FALSE}
+# Required packages and data
+required_packages <- c(
+  "tidyverse",
+  "readr",
+  "tidyr",
+  "ggplot2",
+  "knitr",
+  "dplyr",
+  "stringr",
+  "missForestPredict",
+  "car",
+  "corrplot",
+  "psych",
+  "kableExtra"
+)
+
+# Install missing packages and load libraries
+for (pkg in required_packages) {
+  if (!requireNamespace(pkg, quietly = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org")
+  }
+  library(pkg, character.only = TRUE)
+}
+
+base_data_set_imputed <- readRDS("data/processed/base_data_set_imputed.rds")
+```
+
+```{r source, message=FALSE, warning=FALSE, include=FALSE, paged.print=FALSE}
+source("scripts/01_import.R")
+
+source("scripts/02_cleaning.R")
+
+source("scripts/03_eda.R")
+
+source("scripts/04_analyse.R")
+
+source("scripts/05_linear_model.R")
+```
+
+# Inleiding.
+
+Dit rapport gaat over de huisprijs ontwikkeling in relatie met salarissen. 
+Een gemiddelde woning in Nederland kost op dit moment gemiddeld rond de 4.5 ton, 
+wat voor een modaal enkel inkomen onbereikbaar is.
+Ik berust mijn onderzoek op data afkomstig van het CBS, DNB en allescijfers.nl
+(CBS, 2025; DNB, 2025; Allescijfers, 2025).
+Deze data wordt over het algemeen als betrouwbaar beschouwd, en is derhalve een 
+goed uitgang punt voor verdere analyse. De data is gebaseerd op de periodes van 
+2009 tot en met 2024. De primaire data bronnen als hoofdzaak in dit onderzoek zijn:
+
+- Huis prijzen
+- Het gemiddelde inkomen van de werkende mensen
+- Het gemiddelde inkomen van iedereen in Nederland
+- De hypotheek rente
+- Bevolking groei
+
+Na opschonen en samenvoegen van alle datasets, zijn de missende waarden geïmputeerd 
+met behulp van het algoritme missforest(Stekhoven & Bühlmann, 2012). Omdat de inkomensgegevens per gemeente
+waren gebaseerd op alle inwoners, terwijl het onderzoek zich richt op werkenden, 
+is een correctiefactor toegepast. Deze factor is berekend als de verhouding tussen
+het gemiddelde inkomen van werkenden in Nederland en het gemiddelde inkomen van 
+de totale bevolking. Vervolgens is deze factor gebruikt om de gemeentelijke 
+inkomensgegevens te schalen naar een benadering van het gemiddelde inkomen per werkende.
+
+De uiteindelijke data set heeft de naam “base_data_set_imputed.
+
+# EDA.
+
+Tabel 1 geeft een overzicht van de dataset. Na imputatie bevat deze dataset 
+ook geen ontbrekende waarden.
+
+```{r first_evaluation, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+################################################################################
+# EDA
+################################################################################
+
+# first evaluation
+
+overzicht <- data.frame(
+  Kenmerk = c(
+    "Observaties (N)",
+    "Variabelen",
+    "Periode",
+    "Gemeenten"
+  ),
+  Waarde = c(
+    nrow(base_data_set_imputed),
+    ncol(base_data_set_imputed),
+    "2009-2024",
+    length(unique(base_data_set_imputed$province))
+  )
+)
+
+overzicht |>
+  kbl(
+    caption = "Overzicht van de dataset",
+    align = c("l", "r")
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  )
+
+```
+
+```{r na, echo=FALSE, message=FALSE, warning=FALSE}
+
+################################################################################
+
+cat(
+  "Na imputatie bevat de dataset geen ontbrekende waarden meer (",
+  sum(is.na(base_data_set_imputed)),
+  "ontbrekende waarden)."
+)
+################################################################################
+
+```
+
+Tabel 2 geeft een overzicht van de statistieken van alle afzonderlijke variabelen. 
+Wat meteen opvalt is dat de natuurlijke populatie groei een negatief getal bevat. 
+Later wordt dit verder onderzocht.
+
+```{r tabel_2, echo=FALSE, message=FALSE, warning=FALSE}
+
+desc <- describe(base_data_set_imputed)
+
+desc %>%
+  select(mean, sd, median, min, max) %>%
+  round(2) %>%
+  tibble::rownames_to_column("Variable") %>%
+  kbl(caption = "Descriptive statistics") %>%
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  )
+
+```
+
+# Outliers.
+
+Figuur 1 geeft een overzicht van potentiële ouliers voor alle numerieke variabelen. 
+Verschillende variabelen bevatten potentiële outliers, deze observaties zijn 
+echter niet verwijderd omdat zij plausibele economische waarden kunnen vertegenwoordigen.
+
+```{r fig1, echo=FALSE, message=FALSE, warning=FALSE}
+
+# check for outliers
+
+numeric_data <- base_data_set_imputed %>%
+  select(where(is.numeric)) %>%
+  pivot_longer(
+    cols = -year,
+    names_to = "Variable",
+    values_to = "Value"
+  )
+
+ggplot(numeric_data, aes(y = Value)) +
+  geom_boxplot(
+    fill = "#2C7FB8",
+    colour = "black",
+    alpha = 0.8
+  ) +
+  facet_wrap(
+    ~ Variable,
+    scales = "free",
+    ncol = 3
+  ) +
+  labs(
+    title = "Figuur1. Detectie van potentiële outliers",
+    subtitle = "Boxplots voor alle numerieke variabelen",
+    y = "Waarde"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold", size = 10),
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    plot.title = element_text(face = "bold", size = 14)
+  )
+
+```
+
+# Distributie.
+
+De distributie van de variabelen is weergegeven in figuur 2. Op het oog zijn de 
+variabelen scheef verdeeld. Dit wordt bevestigd door de Q-Q plot in figuur 3. 
+Als de distributie normaal verdeeld zou zijn, moeten de individuele waarnemingen 
+allemaal rond de diagonaal liggen. Derhalve zou men kunnen suggereren kijkend 
+naar economische aspecten dat er in Nederland een grote spreiding is ten opzichte 
+van het landelijk gemiddelde.
+
+```{r fig2_3, echo=FALSE, message=FALSE, warning=FALSE}
+
+################################################################################
+# verdeling van de data
+################################################################################
+
+ggplot(numeric_data, aes(x = Value)) +
+  geom_histogram(
+    aes(y = after_stat(density)),
+    bins = 30,
+    fill = "#2C7FB8",
+    colour = "black",
+    alpha = 0.7
+  ) +
+  geom_density(
+    colour = "darkred",
+    linewidth = 0.8
+  ) +
+  facet_wrap(
+    ~ Variable,
+    scales = "free",
+    ncol = 3
+  ) +
+  labs(
+    title = "Figuur 2. Distributie van de numerieke variabelen",
+    x = "Waarde",
+    y = "Dichtheid"
+  ) +
+  theme_bw()
+
+################################################################################
+# qq plot
+
+ggplot(numeric_data, aes(sample = Value)) +
+  stat_qq() +
+  stat_qq_line(colour = "red") +
+  facet_wrap(
+    ~ Variable,
+    scales = "free",
+    ncol = 3
+  ) +
+  theme_bw() +
+  labs(
+    title = "Figuur 3. Q-Q plots van de numerieke variabelen"
+  )
+
+
+```
+
+# Correlatie.
+
+Figuur 4 illustreert de correlatie van de numerieke variabelen. Wat opvalt is dat 
+de huisprijs met alles behalve hypotheek rente sterk gecorreleerd is.
+Dit suggereert dat er wellicht  multicollineariteit aanwezig is. Als we gaan 
+kijken naar de variance inflation factor (VIF) zien we inderdaad extreme uitschieters.
+Een VIF kleiner dan 5 is acceptabel(Fox & Weisberg, 2019). Intuïtief is deze multicollineariteit 
+niet zo verwonderlijk omdat de inkomens variabelen op zichzelf sterk met elkaar 
+correleren. Tabel 3 geeft hier een overzicht van.
+
+```{r fig4_tab3, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+################################################################################
+# correlatie
+################################################################################
+corr_data <- base_data_set_imputed |>
+  select(
+    house_price,
+    mortgage_rate,
+    avg_income_working_province,
+    natural_pop_growth,
+    migration_growth,
+    total_growth,
+    total_pop_in_mln
+  )
+
+corr_matrix <- cor(corr_data)
+
+corrplot(
+  corr_matrix,
+  method = "color",
+  type = "lower",
+  addCoef.col = "black",
+  tl.col = "black",
+  tl.srt = 45,
+  number.cex = 0.7,
+  title = "fig 4.Correlatiematrix van numerieke variabelen",
+  mar = c(0, 0, 2, 0)
+)
+
+################################################################################
+# Variance Inflation Factor
+################################################################################
+model <- lm(
+  house_price ~ mortgage_rate +
+    avg_income_working_total +
+    avg_income_males_working +
+    avg_income_females_working +
+    avg_income_working_province +
+    total_growth +
+    migration_growth,
+  data = base_data_set_imputed
+)
+
+vif_table <- data.frame(
+  Variable = names(vif(model)),
+  VIF = round(vif(model), 2)
+)
+
+vif_table |>
+  kbl(
+    caption = "Variance Inflation Factors (VIF)",
+    align = c("l", "r")
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  )
+
+```
+
+# Analyse.
+Kijkend naar de ontwikkeling van de variabelen door de tijd (figuur 5), vallen 
+een aantal dingen op. Als we naar de totale populatie (bevolking) in Nederland kijken, 
+zien we een opwaartse trend. Echter zien  we een daling bij de natuurlijke 
+groei (nieuw geborenen). Migratie daarentegen laat wel weer een opwaartse trend zien. 
+Dit zou een verklarende factor kunnen zijn voor de opwaartse totale groei. 
+De trendlijn is weliswaar opwaarts, maar kijkend naar de waargenomen waarden 
+zien we dat er na 2023 een daling heeft ingezet. Dit zien we echter nog niet 
+terug in de totale populatie. De afnemende natuurlijke groei kan op langere termijn 
+bijdragen aan vergrijzing, maar op basis van deze analyse kan hierover geen 
+definitieve conclusie worden getrokken.
+
+```{r fig5, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+# create trendline
+ggplot(numeric_data, aes(x = year, y = Value)) +
+  geom_line(
+    colour = "#2C7FB8",
+    linewidth = 0.8
+  ) +
+  geom_smooth(
+    method = "lm",
+    se = FALSE,
+    colour = "darkred",
+    linewidth = 1.1
+  ) +
+  facet_wrap(
+    ~ Variable,
+    scales = "free_y",
+    ncol = 3
+  ) +
+  labs(
+    title = "Figuur 5. Ontwikkeling van de variabelen door de tijd",
+    subtitle = "Blauw = waargenomen waarden, rood = lineaire trend",
+    x = "Jaar",
+    y = "Waarde"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
+```
+
+Nederland telt ongeveer 18 miljoen mensen, van al deze mensen heeft ongeveer 50% 
+een betaalde baan. De overige 50% zijn in dit geval kinderen en ouderen, arbeid 
+ongeschikten en overige mensen zonder baan.
+
+Figuur 6 geeft de salaris ontwikkeling aan per gemeente over tijd. Wat opvalt is 
+dat er een behoorlijke spreiding zit tussen de individuele gemeenten. De salarissen 
+zijn niet uniform over heel Nederland, derhalve is de trend voor alle gemeenten 
+wel omhoog.
+
+Wat opvalt, is een dip tussen de periode 2012 en 2014. In deze periode lag de 
+inflatie in Nederland relatief hoog. Omdat bedrijven het zwaar hadden door de 
+economische crisis, werden er in de cao-onderhandelingen nauwelijks loonsverhogingen 
+afgesproken. De nominale lonen stegen dus bijna niet, terwijl het leven fors 
+duurder werd. Dit zorgde ervoor dat het reële salaris 
+(wat je daadwerkelijk kunt kopen met je loon) daalde.
+
+Een van de primaire levensbehoeften is het hebben van een woning. Dit kan d.m.v. huur 
+of koop. In dit rapport wordt alleen gefocust op koop woningen.
+
+```{r fig6, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+################################################################################
+# bekijk inkomen per provincie over tijd
+################################################################################
+
+  ggplot(
+    base_data_set_imputed,
+    aes(
+      x = year,
+      y = avg_income_working_province,
+      group = province
+    )
+  ) +
+  geom_line(alpha = 0.3) +
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    colour = "red",
+    linewidth = 1.5
+  ) +
+  theme_minimal()+
+  labs(
+    title = "Figuur 6. Salaris ontwikkeling",
+    subtitle = "grijs = trend per gemeente, rood = gemiddelde trend",
+    x = "Jaar",
+    y = "Waarde"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
+```
+
+Als we gaan kijken wat de huizen prijzen per gemeente over tijd doen (figuur 7),
+zien we dat de gemiddelde prijs in 2024 al boven de 4 ton lag. Ook hier is weer 
+een behoorlijke spreiding over de individuele gemeenten te zien. Wat opvalt is 
+een dip in de prijsstijging rond 2023. Deze dip werd voornamelijk veroorzaakt 
+door een plotselinge, sterke stijging van de hypotheek rente, gecombineerd met
+een hoge inflatie.
+
+Het verband tussen hypotheek rente en huizenprijzen wordt weergegeven in figuur 8.
+Een dalende rente suggereert een prijsstijging en visa versa.
+
+```{r fig7_8, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+################################################################################
+# woning prijzen over tijd per gemeente
+################################################################################
+
+ggplot(
+  base_data_set_imputed,
+  aes(
+    x = year,
+    y = house_price,
+    group = province
+  )
+) +
+  geom_line(alpha = 0.3) +
+  stat_summary(
+    aes(group = 1),
+    fun = mean,
+    geom = "line",
+    colour = "red",
+    linewidth = 1.5
+  ) +
+  theme_minimal()+
+  labs(
+    title = "Figuur 7. Woning prijs ontwikkeling",
+    subtitle = "grijs = trend per gemeente, rood = gemiddelde trend",
+    x = "Jaar",
+    y = "Waarde"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
+################################################################################
+# hypothee rente en woning prijzen
+################################################################################
+plot_data <- base_data_set_imputed |>
+  group_by(year) |>
+  summarise(
+    avg_house_price = mean(house_price, na.rm = TRUE),
+    avg_mortgage_rate = mean(mortgage_rate, na.rm = TRUE)
+  )
+
+ggplot(plot_data, aes(x = year)) +
+  geom_line(
+    aes(y = avg_house_price,
+        color = "Gemiddelde huizenprijs"),
+    linewidth = 1.2
+  ) +
+  geom_line(
+    aes(
+      y = avg_mortgage_rate *
+        max(avg_house_price) /
+        max(avg_mortgage_rate),
+      color = "Hypotheekrente"
+    ),
+    linewidth = 1.2
+  ) +
+  scale_y_continuous(
+    name = "Gemiddelde huizenprijs (€)",
+    sec.axis = sec_axis(
+      ~ . * max(plot_data$avg_mortgage_rate) /
+        max(plot_data$avg_house_price),
+      name = "Hypotheekrente (%)"
+    )
+  ) +
+  scale_color_manual(
+    values = c(
+      "Gemiddelde huizenprijs" = "#2C7FB8",
+      "Hypotheekrente" = "#D95F02"
+    )
+  ) +
+  labs(
+    title = "Figuur 8. Ontwikkeling van huizenprijzen en hypotheekrente",
+    x = "Jaar",
+    color = NULL
+  ) +
+  theme_bw() +
+  theme(
+    plot.title = element_text(face = "bold"),
+    legend.position = "bottom"
+  )
+
+```
+
+Kijkend naar de ontwikkeling van de geïndexeerde huisprijzen en inkomens (figuur 9), 
+valt gelijk op dat vanaf 2017 er een kloof ontstaat die over de jaren groter wordt.
+Vanaf 2016 / 2017 voerde de ECB een ongeëvenaarde ruim monetair beleid met 
+historische lage rentes. De hypotheek rente in Nederland zakte naar recorddieptes 
+van rond de 1% tot 1.5%. Omdat de rente zo laag was, daalde de maandlasten per 
+geleende euro fors. Hierdoor mochten huishoudens volgens de NIBUD-normen op basis 
+van het zelfde salaris plotseling tienduizenden euro’s meer lenen. Dit extra 
+leengeld stroomde direct de woningmarkt op, waardoor kopers elkaar overboden en 
+de prijzen veel sneller stegen dan hun daadwerkelijke lonen.
+
+De verwachting is dat nu de rentes ruim 4% zijn, de kloof niet groter wordt. 
+Maar deze kloof is op zich nog lang niet gedicht.
+
+Een gemiddeld huis zit nu rond de 4.5 ton, wat voor een modaal enkel inkomen 
+onbereikbaar is.
+
+```{r fig9, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+################################################################################
+# inkomen versus huisprijzen
+################################################################################
+plot_data <- base_data_set_imputed |>
+  group_by(year) |>
+  summarise(
+    avg_house_price = mean(house_price, na.rm = TRUE),
+    avg_income = mean(avg_income_working_total, na.rm = TRUE)
+  ) |>
+  mutate(
+    house_index = avg_house_price /
+      first(avg_house_price) * 100,
+    income_index = avg_income /
+      first(avg_income) * 100
+  )
+
+ggplot(plot_data, aes(x = year)) +
+  geom_line(
+    aes(y = house_index,
+        color = "Huizenprijs"),
+    linewidth = 1.2
+  ) +
+  geom_line(
+    aes(y = income_index,
+        color = "Inkomen"),
+    linewidth = 1.2
+  ) +
+  labs(
+    title = "Figuur 9. Geïndexeerde ontwikkeling van huizenprijzen en inkomen",
+    subtitle = "2009 = 100",
+    x = "Jaar",
+    y = "Index",
+    color = NULL
+  ) +
+  scale_color_manual(
+    values = c(
+      "Huizenprijs" = "#2C7FB8",
+      "Inkomen" = "#31A354"
+    )
+  ) +
+  theme_bw() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold")
+  )
+
+```
+
+Als we een betaalbaarheid ratio maken door de gemiddelde huisprijs te delen door
+het gemiddelde inkomen, zien we dat de gemiddelde huis prijs in 2024 al 8.75 maal 
+hoger lag dan het gemiddelde bruto jaarinkomen. (figuur 10)
+
+Als grove vuistregel kan je bij een bank over het algemeen 4 maal het bruto jaarinkomen 
+lenen voor een hypotheek. Dit is meer dan 50% lager dan de betaalbaarheid ratio. 
+Dit onderbouwt de stelling dat een enkel modaal inkomen zonder spaargeld geen koop
+woning kan bemachtigen.
+
+Zelfs als je twee verdiener bent met een modaal inkomen zonder spaargeld wordt 
+het al lastig.
+
+```{r fig10, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+
+plot_data <- base_data_set_imputed |>
+  group_by(year) |>
+  summarise(
+    house_price = mean(house_price),
+    income = mean(avg_income_working_total)
+  ) |>
+  mutate(
+    affordability_ratio = house_price / income
+  )
+
+ggplot(
+  plot_data,
+  aes(year, affordability_ratio)
+) +
+  geom_line() +
+  geom_point() +
+  theme_minimal()+
+  labs(
+    title = "Figuur 10. betaalbaarheids ratio",
+    x = "Jaar",
+    y = "ratio"
+  ) +
+  theme_bw() +
+  theme(
+    strip.background = element_rect(fill = "grey90"),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
+```
+
+# Modelering.
+
+Om een voorspelling te maken tot en met het jaar 2030, heb ik overwogen om
+meerdere modellen te gebruiken. Uiteindelijk is gebleken dat een relatief simpel 
+lineair model het beste scoorde. 
+Dit vanwege een:
+
+-	RMSE:  82768
+-	MAE :  68943
+
+Maar voornamelijk omdat dit model gezien de huidige tijd economisch plausibel is.
+
+Als we naar de verwachte huisprijzen kijken (figuur 11), dan valt op dat de 
+gemiddelde huisprijs medio 2029 de 5 ton doorkruist. Voor het salaris medio 2029 
+doorkruist hij de 48000 euro. (figuur 12)
+
+```{r fig11_12, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+# fig 11
+ggplot(
+  future_data,
+  aes(
+    x = year,
+    y = predicted_house_price
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = lower_bound,
+      ymax = upper_bound
+    ),
+    fill = "steelblue",
+    alpha = 0.20
+  ) +
+  geom_line(
+    colour = "steelblue",
+    linewidth = 1.4
+  ) +
+  geom_point(
+    colour = "steelblue",
+    size = 3
+  ) +
+  scale_y_continuous(
+    labels = scales::label_number(
+      big.mark = "."
+    )
+  ) +
+  theme_bw() +
+  labs(
+    title = "Figuur 11. Verwachte ontwikkeling van huizenprijzen",
+    subtitle = "Voorspelling op basis van lineaire regressie",
+    x = "Jaar",
+    y = "Gemiddelde huizenprijs (€)"
+  )
+
+# fig 12
+ggplot(
+  future_data,
+  aes(
+    x = year,
+    y = avg_income_working_province
+  )
+) +
+  geom_ribbon(
+    aes(
+      ymin = income_lower,
+      ymax = income_upper
+    ),
+    fill = "darkgreen",
+    alpha = 0.2
+  ) +
+  geom_line(
+    colour = "darkgreen",
+    linewidth = 1.2
+  ) +
+  geom_point(
+    colour = "darkgreen",
+    size = 3
+  ) +
+  theme_bw() +
+  labs(
+    title = "Figuur 12. Verwachte ontwikkeling van inkomen",
+    subtitle = "95% betrouwbaarheidsinterval",
+    x = "Jaar",
+    y = "Gemiddeld inkomen (€)"
+  )
+
+```
+
+Het model suggereert dat de lonen en de huisprijzen zullen gaan stijgen in de toekomst. 
+Figuur 13 laat de historische en voorspellende huisprijzen zien. Als we naar de 
+ontwikkeling van de huizenprijzen en inkomens kijken, zien we dat de 
+kloof (besproken op pagina 7), wel degelijk groter wordt volgens het model.(figuur 14)
+
+```{r fig13_14, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+# fif 13
+historical <- housing_data |>
+  group_by(year) |>
+  summarise(
+    house_price =
+      mean(house_price)
+  ) |>
+  mutate(
+    type = "Historisch"
+  )
+
+forecast <- future_data |>
+  transmute(
+    year,
+    house_price =
+      predicted_house_price,
+    type = "Voorspelling"
+  )
+
+plot_data <- bind_rows(
+  historical,
+  forecast
+)
+
+ggplot(
+  plot_data,
+  aes(
+    year,
+    house_price,
+    colour = type
+  )
+) +
+  geom_line(
+    linewidth = 1.4
+  ) +
+  geom_point(
+    size = 2
+  ) +
+  theme_bw() +
+  labs(
+    title = "Figuur 13. Historische en voorspelde huizenprijzen",
+    x = "Jaar",
+    y = "Gemiddelde huizenprijs (€)"
+  )
+
+# fig 14
+plot_data <- future_data |>
+  transmute(
+    year,
+    
+    house_price_index =
+      predicted_house_price /
+      first(predicted_house_price) * 100,
+    
+    income_index =
+      avg_income_working_province /
+      first(avg_income_working_province) * 100
+  ) |>
+  pivot_longer(
+    -year,
+    names_to = "variable",
+    values_to = "value"
+  )
+
+ggplot(
+  plot_data,
+  aes(
+    x = year,
+    y = value,
+    colour = variable
+  )
+) +
+  geom_line(
+    linewidth = 1.3
+  ) +
+  geom_point(
+    size = 3
+  ) +
+  theme_bw() +
+  labs(
+    title = "Figuur 14. Ontwikkeling huizenprijzen en inkomens",
+    subtitle = "Index (2025 = 100)",
+    x = "Jaar",
+    y = "Index",
+    colour = ""
+  ) +
+  scale_colour_manual(
+    values = c(
+      "house_price_index" = "steelblue",
+      "income_index" = "darkgreen"
+    ),
+    labels = c(
+      "Huizenprijs",
+      "Inkomen"
+    )
+  )
+
+```
+
+Kijkend naar de ontwikkeling van de betaalbaarheid ( de huizenprijs / inkomen),
+zie figuur 15. Dan zien we dat in 2030 er een ratio voorspeld wordt van 10.3.
+
+De statistieken van het model worden weergegeven in tabel 4.
+
+```{r fig15_tab4, echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+# fig 15
+ggplot(
+  future_data,
+  aes(
+    year,
+    affordability_ratio
+  )
+) +
+  geom_line(
+    colour = "firebrick",
+    linewidth = 1.4
+  ) +
+  geom_point(
+    colour = "firebrick",
+    size = 3
+  ) +
+  geom_text(
+    aes(
+      label = round(
+        affordability_ratio,
+        1
+      )
+    ),
+    vjust = -0.5
+  ) +
+  theme_bw() +
+  labs(
+    title = "Figuur 15. Ontwikkeling van de betaalbaarheid",
+    subtitle = "Huizenprijs gedeeld door inkomen",
+    x = "Jaar",
+    y = "Prijs-inkomenratio"
+  )
+
+# tab 4
+model_stats <- data.frame(
+  Metriek = c(
+    "Observaties",
+    "Residual Standard Error",
+    "R-squared",
+    "Adjusted R-squared",
+    "F-statistic"
+  ),
+  Waarde = c(
+    nobs(lm_model),
+    round(summary(lm_model)$sigma, 0),
+    round(summary(lm_model)$r.squared, 3),
+    round(summary(lm_model)$adj.r.squared, 3),
+    round(summary(lm_model)$fstatistic[1], 1)
+  )
+)
+
+model_stats |>
+  kbl(
+    caption = "Modelstatistieken",
+    align = c("l", "r")
+  ) |>
+  kable_styling(
+    bootstrap_options = c("striped", "hover"),
+    full_width = FALSE
+  )
+```
+
+# Conclusie.
+
+Als we ons af gaan vragen, in hoeverre is het financieel nog mogelijk om voor een 
+individu zonder spaargeld met een modaal inkomen, nog een huis / woning te kopen,
+kunnen we uit de historische data concluderen dat het in het jaar 2024 al praktisch 
+niet mogelijk was om als alleenstaande met een modaal inkomen een woning te kopen. 
+Als twee verdiener lukte het misschien net.
+
+Vandaag de dag 2026, liggen de prijzen al een stuk hoger, en het model suggereert 
+dat de prijzen blijven stijgen, waarbij het model laat zien dat de lonen niet in 
+hetzelfde tempo mee stijgen. 
+
+Gevolg hiervan is dat de betaalbaarheid ratio alleen maar toe neemt.
+Als hypothetisch gezien het model correct voorspelt, is het voor het overgrote deel 
+van de populatie niet meer mogelijk om voldoende financiering te krijgen om een
+woning te bekostigen zonder eigen geld.
+
+# Beperkingen.
+
+Dit model berust zich op maar een beperkt aantal voorspellers (variabelen).  
+Als er een grootschalig en nauwkeurige analyse gedaan zou willen worden, zullen
+er meer variabelen geïntroduceerd moeten worden. En dan worden wellicht modellen 
+als Random Forest en XGboost wel interessant.
+
+# Referenties.
+
+Data
+
+-CBS. (2025). StatLine: Inkomen, bevolking en demografische ontwikkelingen. Centraal Bureau voor de Statistiek.
+
+-De Nederlandsche Bank. (2025). Historische hypotheekrentes. De Nederlandsche Bank.
+
+-Allescijfers.nl. (2025). Woningprijzen per gemeente. Allescijfers.nl.
+
+Methodologie
+
+-Stekhoven, D. J., & Bühlmann, P. (2012). MissForest: Non-parametric missing value imputation for mixed-type data. Bioinformatics, 28(1), 112-118.
+
+-James, G., Witten, D., Hastie, T., & Tibshirani, R. (2021). An Introduction to Statistical Learning (2e editie). Springer.
+
+-Fox, J., & Weisberg, S. (2019). An R Companion to Applied Regression (3e editie). Sage.
+
+-Hyndman, R. J., & Athanasopoulos, G. (2021). Forecasting: Principles and Practice (3e editie). OTexts.
+
+R Packages
+
+-Wickham, H. et al. (2023). tidyverse.
+
+-Kuhn, M. et al. caret (indien gebruikt).
+
+-Wei, T., & Simko, V. corrplot.
+
+-Dong, Y. et al. missForestPredict.
